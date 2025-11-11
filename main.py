@@ -1,8 +1,19 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
+# Create rate limiter
+limiter = Limiter(key_func=get_remote_address)
+
+# Create FastAPI app
 app = FastAPI()
+
+# Add rate limit error handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # This is our data model - it defines what a task looks like
 class Task(BaseModel):
@@ -41,38 +52,40 @@ def bubble_sort_tasks(task_list, key_field):
     
     return sorted_list
 
-# Root endpoint
+# Root endpoint - Allow 10 requests per minute
 @app.get("/")
-def read_root():
+@limiter.limit("10/minute")
+def read_root(request: Request):
     return {"message": "Task Manager API - Go to /docs for documentation"}
 
-# CREATE: Add a new task
+# CREATE - Allow 5 new tasks per minute (prevent spam)
 @app.post("/tasks/", response_model=Task)
-def create_task(task: Task):
+@limiter.limit("5/minute")
+def create_task(request: Request, task: Task):
     global task_id_counter
     task.id = task_id_counter
     task_id_counter += 1
     tasks.append(task.dict())
     return task
 
-# READ: Get all tasks
+# READ all - Allow 20 requests per minute
 @app.get("/tasks/")
+@limiter.limit("20/minute")
 def get_all_tasks(
+    request: Request,
     search: Optional[str] = None,
     completed: Optional[bool] = None,
     sort_by: Optional[str] = None,
-    order: Optional[str] = "asc"
+    order: Optional[str] = "asc",
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)")
 ):
     """
-    Get all tasks with optional filtering and sorting:
-    - search: Search for tasks by title (case-insensitive)
-    - completed: Filter by completion status (true/false)
-    - sort_by: Sort by field (title, id, completed)
-    - order: Sort order (asc for ascending, desc for descending)
+    Get all tasks with optional filtering, sorting, and pagination
     """
     filtered_tasks = tasks.copy()
     
-    # Filter by search query (Linear Search Algorithm)
+    # Filter by search query
     if search:
         search_lower = search.lower()
         filtered_tasks = [
@@ -87,7 +100,7 @@ def get_all_tasks(
             if task["completed"] == completed
         ]
     
-    # Sort tasks (Python's Timsort - a hybrid of Merge Sort and Insertion Sort)
+    # Sort tasks
     if sort_by:
         reverse = (order == "desc")
         
@@ -98,16 +111,37 @@ def get_all_tasks(
         elif sort_by == "completed":
             filtered_tasks = sorted(filtered_tasks, key=lambda x: x["completed"], reverse=reverse)
     
+    # Pagination
+    total_items = len(filtered_tasks)
+    total_pages = (total_items + page_size - 1) // page_size
+    
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    
+    paginated_tasks = filtered_tasks[start_index:end_index]
+    
+    has_previous = page > 1
+    has_next = page < total_pages
+    
     return {
-        "tasks": filtered_tasks, 
-        "total": len(filtered_tasks),
+        "tasks": paginated_tasks,
+        "pagination": {
+            "current_page": page,
+            "page_size": page_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+            "has_previous": has_previous,
+            "has_next": has_next,
+            "previous_page": page - 1 if has_previous else None,
+            "next_page": page + 1 if has_next else None
+        },
         "filters_applied": {
             "search": search,
             "completed": completed,
             "sort_by": sort_by,
             "order": order
         }
-    }
+    }  
 
 # Special endpoint to demonstrate Bubble Sort algorithm
 @app.get("/tasks/bubble-sort")
@@ -127,7 +161,7 @@ def get_tasks_bubble_sorted(sort_by: str = "id"):
         "algorithm_used": "Bubble Sort",
         "time_complexity": "O(n²)",
         "note": "This is for educational purposes. Production uses Timsort (O(n log n))"
-    }
+    }  
 
 # READ: Get a specific task by ID
 @app.get("/tasks/{task_id}")
@@ -148,11 +182,45 @@ def update_task(task_id: int, updated_task: Task):
             return updated_task
     raise HTTPException(status_code=404, detail="Task not found")
 
-# DELETE: Remove a task completely
+# DELETE - Allow 10 deletes per minute
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: int):
+@limiter.limit("10/minute")
+def delete_task(request: Request, task_id: int):
     for index, task in enumerate(tasks):
         if task["id"] == task_id:
             deleted_task = tasks.pop(index)
             return {"message": "Task deleted successfully", "deleted_task": deleted_task}
     raise HTTPException(status_code=404, detail="Task not found")
+
+# UTILITY: Generate sample tasks for testing
+@app.post("/tasks/generate-samples")
+def generate_sample_tasks(count: int = Query(25, ge=1, le=100)):
+    """
+    Generate sample tasks for testing pagination
+    """
+    global task_id_counter
+    
+    generated = []
+    for i in range(count):
+        task = {
+            "id": task_id_counter,
+            "title": f"Sample Task {task_id_counter}",
+            "description": f"This is test task number {task_id_counter}",
+            "completed": task_id_counter % 3 == 0  # Every 3rd task is completed
+        }
+        
+        tasks.append(task)
+        generated.append(task)
+        task_id_counter += 1
+    
+    return {
+        "message": f"Generated {count} sample tasks",
+        "generated": generated
+    }  
+
+# Railway to assign the port dynamically.
+if __name__ == "__main__":
+import uvicorn
+import os
+port = int(os.environ.get("PORT", 8000))
+uvicorn.run(app, host="0.0.0.0", port=port)
