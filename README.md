@@ -350,3 +350,5 @@ This project is open source and available for educational purposes.
 *Demonstrating CRUD operations, search algorithms, sorting algorithms, pagination, rate limiting, and RESTful API design*
 
 **⭐ If you found this project helpful, please give it a star!**
+
+*Current Status: Maintenance Mode. updating dependencies for 2026.*
